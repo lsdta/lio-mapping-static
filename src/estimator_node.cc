@@ -53,7 +53,7 @@ using namespace mathutils;
 
 static ros::NodeHandlePtr nh_ptr;
 
-static std::string config_file = "/home/hyye/dev_ws/src/lio/config/test_config.yaml";
+static std::string config_file = "";
 
 void Run() {
 
@@ -134,17 +134,20 @@ void Run() {
     estimator_config.pim_config.gyr_w = tmp_double;
     tmp_double = fs_settings["g_norm"];
     estimator_config.pim_config.g_norm = tmp_double;
+    
+    tmp_double = fs_settings["static_init"];
+    estimator_config.static_init = (tmp_double > 0);
 
     tmp_double = fs_settings["msg_time_delay"];
     mm_config.msg_time_delay = tmp_double;
   }
 
-  Estimator estimator(estimator_config);
+  Estimator estimator(estimator_config, mm_config);
   estimator.SetupRos(*nh_ptr);
 
   int odom_io = fs_settings["odom_io"];
 
-  PointOdometry odometry(0.1, odom_io);
+  PointOdometry odometry(0.1, odom_io); // mm_config.scan_period, mm_config.odom_io
   odometry.SetupRos(*nh_ptr);
   odometry.Reset();
 
@@ -185,7 +188,7 @@ int main(int argc, char **argv) {
     nh_ptr = boost::make_shared<ros::NodeHandle>(nh);
   }
 
-  nh_ptr->param("config_file", config_file, std::string("/home/hyye/dev_ws/src/lio/config/test_config.yaml"));
+  nh_ptr->param("config_file", config_file, std::string(""));
   FLAGS_alsologtostderr = true;
 
   Run();

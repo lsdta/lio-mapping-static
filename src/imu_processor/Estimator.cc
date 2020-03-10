@@ -30,6 +30,7 @@
 
 #include <ceres/ceres.h>
 #include "imu_processor/Estimator.h"
+#include "imu_processor/ImuInitializerStatic.h"
 
 #include <pcl/common/transforms.h>
 #include <pcl/search/impl/flann_search.hpp>
@@ -145,6 +146,8 @@ Estimator::~Estimator() {
 void Estimator::SetupAllEstimatorConfig(const EstimatorConfig &config, const MeasurementManagerConfig &mm_config) {
 
   this->mm_config_ = mm_config;
+  this->scan_period_ = mm_config_.scan_period;
+  this->time_factor_ = 1.0 / this->scan_period_;
 
   if (estimator_config_.window_size != config.window_size) {
     all_laser_transforms_.Reset(config.window_size + 1);
@@ -530,7 +533,7 @@ void Estimator::ProcessLaserOdom(const Transform &transform_in, const std_msgs::
               }
             }
 
-            if (extrinsic_stage_ != 2 && (header.stamp.toSec() - initial_time_) > 0.1) {
+            if (extrinsic_stage_ != 2 && (header.stamp.toSec() - initial_time_) > mm_config_.scan_period) {
               DLOG(INFO) << "EXTRINSIC STAGE: " << extrinsic_stage_;
               init_result = RunInitialization();
               initial_time_ = header.stamp.toSec();
@@ -638,7 +641,7 @@ void Estimator::ProcessLaserOdom(const Transform &transform_in, const std_msgs::
             for (int i = int(imu_stampedtransforms.size()) - 1; i >= 0; --i) {
               time_s = imu_stampedtransforms[i].time;
               transform_s = imu_stampedtransforms[i].transform;
-              if (time_e - imu_stampedtransforms[i].time >= 0.1) {
+              if (time_e - imu_stampedtransforms[i].time >= mm_config_.scan_period) {
                 break;
               }
             }
@@ -650,7 +653,7 @@ void Estimator::ProcessLaserOdom(const Transform &transform_in, const std_msgs::
             Transform transform_body_es = transform_e.inverse() * transform_s;
 //            transform_body_es.pos = -0.1 * body_velocity.cast<float>();
             {
-              float s = 0.1 / (time_e - time_s);
+              float s = mm_config_.scan_period / (time_e - time_s);
               Eigen::Quaternionf q_id, q_s, q_e, q_half;
               q_e = transform_body_es.rot;
               q_id.setIdentity();
@@ -665,11 +668,11 @@ void Estimator::ProcessLaserOdom(const Transform &transform_in, const std_msgs::
             DLOG(INFO) << "transform diff norm: " << transform_es_.pos.norm();
 
             if (!estimator_config_.cutoff_deskew) {
-              TransformToEnd(laser_cloud_surf_last_, transform_es_, 10);
+              TransformToEnd(laser_cloud_surf_last_, transform_es_, this->time_factor_);
 
-              TransformToEnd(laser_cloud_corner_last_, transform_es_, 10);
+              TransformToEnd(laser_cloud_corner_last_, transform_es_, this->time_factor_);
 #ifdef USE_CORNER
-              TransformToEnd(corner_stack_.last(), transform_es_, 10);
+              TransformToEnd(corner_stack_.last(), transform_es_, this->time_factor_);
 #endif
             } else {
               DLOG(INFO) << "cutoff_deskew";
@@ -701,11 +704,11 @@ void Estimator::ProcessLaserOdom(const Transform &transform_in, const std_msgs::
           SolveOptimization();
 
           if (!opt_point_coeff_mask_.first()) {
-            UpdateMapDatabase(opt_corner_stack_.first(),
-                              opt_surf_stack_.first(),
-                              opt_valid_idx_.first(),
-                              opt_transforms_.first(),
-                              opt_cube_centers_.first());
+            //UpdateMapDatabase(opt_corner_stack_.first(),
+            //                  opt_surf_stack_.first(),
+            //                  opt_valid_idx_.first(),
+            //                  opt_transforms_.first(),
+            //                  opt_cube_centers_.first());
 
             DLOG(INFO) << "all_laser_transforms_: " << all_laser_transforms_[estimator_config_.window_size
                 - estimator_config_.opt_window_size].second.transform;
@@ -718,7 +721,7 @@ void Estimator::ProcessLaserOdom(const Transform &transform_in, const std_msgs::
                      << " != estimator_config_.opt_window_size + 1: " << estimator_config_.opt_window_size + 1;
         }
 
-        PublishResults();
+        PublishResults(false);
 
         SlideWindow();
 
@@ -857,45 +860,52 @@ void Estimator::ProcessCompactData(const sensor_msgs::PointCloud2ConstPtr &compa
 
 bool Estimator::RunInitialization() {
 
-  // NOTE: check IMU observibility, adapted from VINS-mono
-  {
-    PairTimeLaserTransform laser_trans_i, laser_trans_j;
-    Vector3d sum_g;
-
-    for (size_t i = 0; i < estimator_config_.window_size;
-         ++i) {
-      laser_trans_j = all_laser_transforms_[i + 1];
-
-      double dt = laser_trans_j.second.pre_integration->sum_dt_;
-      Vector3d tmp_g = laser_trans_j.second.pre_integration->delta_v_ / dt;
-      sum_g += tmp_g;
-    }
-
-    Vector3d aver_g;
-    aver_g = sum_g * 1.0 / (estimator_config_.window_size);
-    double var = 0;
-
-    for (size_t i = 0; i < estimator_config_.window_size;
-         ++i) {
-      laser_trans_j = all_laser_transforms_[i + 1];
-      double dt = laser_trans_j.second.pre_integration->sum_dt_;
-      Vector3d tmp_g = laser_trans_j.second.pre_integration->delta_v_ / dt;
-      var += (tmp_g - aver_g).transpose() * (tmp_g - aver_g);
-    }
-
-    var = sqrt(var / (estimator_config_.window_size));
-
-    DLOG(INFO) << "IMU variation: " << var;
-
-    if (var < 0.25) {
-      ROS_INFO("IMU excitation not enough!");
-      return false;
-    }
-  }
-
   Eigen::Vector3d g_vec_in_laser;
-  bool init_result
-      = ImuInitializer::Initialization(all_laser_transforms_, Vs_, Bas_, Bgs_, g_vec_in_laser, transform_lb_, R_WI_);
+  bool init_result = false;
+  if (!estimator_config_.static_init) {
+    // NOTE: check IMU observibility, adapted from VINS-mono
+    {
+      PairTimeLaserTransform laser_trans_i, laser_trans_j;
+      Vector3d sum_g;
+
+      for (size_t i = 0; i < estimator_config_.window_size;
+           ++i) {
+        laser_trans_j = all_laser_transforms_[i + 1];
+
+        double dt = laser_trans_j.second.pre_integration->sum_dt_;
+        Vector3d tmp_g = laser_trans_j.second.pre_integration->delta_v_ / dt;
+        sum_g += tmp_g;
+      }
+
+      Vector3d aver_g;
+      aver_g = sum_g * 1.0 / (estimator_config_.window_size);
+      double var = 0;
+
+      for (size_t i = 0; i < estimator_config_.window_size;
+           ++i) {
+        laser_trans_j = all_laser_transforms_[i + 1];
+        double dt = laser_trans_j.second.pre_integration->sum_dt_;
+        Vector3d tmp_g = laser_trans_j.second.pre_integration->delta_v_ / dt;
+        var += (tmp_g - aver_g).transpose() * (tmp_g - aver_g);
+      }
+
+      var = sqrt(var / (estimator_config_.window_size));
+
+      DLOG(INFO) << "IMU variation: " << var;
+
+      if (var < 0.25) {
+        ROS_INFO("IMU excitation not enough!");
+        return false;
+      }
+    }
+    init_result =
+        ImuInitializer::Initialization(all_laser_transforms_, Vs_, Bas_, Bgs_,
+                                       g_vec_in_laser, transform_lb_, R_WI_);
+  } else {
+    init_result = ImuInitializerStatic::Initialization(
+        all_laser_transforms_, Vs_, Bas_, Bgs_, g_vec_in_laser, transform_lb_,
+        R_WI_);
+  }
 //  init_result = false;
 
 //  Q_WI_ = R_WI_;
@@ -1662,6 +1672,8 @@ void Estimator::SolveOptimization() {
   // NOTE: indoor test
 //  loss_function = new ceres::HuberLoss(0.5);
   loss_function = new ceres::CauchyLoss(1.0);
+  
+  double average_dist = 0;
 
   // NOTE: update from laser transform
   if (estimator_config_.update_laser_imu) {
@@ -1690,6 +1702,9 @@ void Estimator::SolveOptimization() {
     vector<Transform> imu_poses, lidar_poses;
 
     for (int i = 0; i < estimator_config_.opt_window_size + 1; ++i) {
+	  if (i != estimator_config_.opt_window_size) {
+        average_dist += (Ps_[i + 1] - Ps_[i]).norm();
+      }
       int opt_i = int(estimator_config_.window_size - estimator_config_.opt_window_size + i);
 
       Quaterniond rot_li(Rs_[opt_i] * transform_lb.rot.inverse());
@@ -1711,6 +1726,8 @@ void Estimator::SolveOptimization() {
       imu_poses.push_back(transform_bi.cast<float>());
       lidar_poses.push_back(transform_li.cast<float>());
     }
+	
+	average_dist /= estimator_config_.opt_window_size;
 
     //region Check for imu res
 //    for (int i = 0; i < estimator_config_.window_size; ++i) {
@@ -1759,7 +1776,7 @@ void Estimator::SolveOptimization() {
     ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
     problem.AddParameterBlock(para_ex_pose_, SIZE_POSE, local_parameterization);
     para_ids.push_back(para_ex_pose_);
-    if (extrinsic_stage_ == 0 || estimator_config_.opt_extrinsic == false) {
+    if (extrinsic_stage_ == 0 || estimator_config_.opt_extrinsic == false || average_dist < 0.01) {
       DLOG(INFO) << "fix extrinsic param";
       problem.SetParameterBlockConstant(para_ex_pose_);
     } else {
@@ -2407,13 +2424,13 @@ void Estimator::SolveOptimization() {
         // NOTE: full stack into end of the scan
 //        PointCloudPtr tmp_points_ptr = boost::make_shared<PointCloud>(PointCloud());
 //        *tmp_points_ptr = *(full_stack_.last());
-//        TransformToEnd(tmp_points_ptr, transform_es_, 10);
+//        TransformToEnd(tmp_points_ptr, transform_es_, this->time_factor_);
 //        PublishCloudMsg(pub_predict_corrected_full_points_,
 //                        *tmp_points_ptr,
 //                        Headers_.last().stamp,
 //                        "/laser_predict");
 
-        TransformToEnd(full_stack_.last(), transform_es_, 10, true);
+        TransformToEnd(full_stack_.last(), transform_es_, this->time_factor_, true);
         PublishCloudMsg(pub_predict_corrected_full_points_,
                         *(full_stack_.last()),
                         Headers_.last().stamp,
@@ -2667,7 +2684,7 @@ void Estimator::SlideWindow() { // NOTE: this function is only for the states an
 
 void Estimator::ProcessEstimation() {
 
-  while (true) {
+  while (ros::ok()) {
     PairMeasurements measurements;
     std::unique_lock<std::mutex> buf_lk(buf_mutex_);
     con_.wait(buf_lk, [&] {

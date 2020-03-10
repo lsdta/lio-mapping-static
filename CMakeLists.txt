@@ -222,10 +222,18 @@ set(imu_processor_EXT_LIBS
   ${factor_EXT_LIBS}
 )
 
+add_library(${PROJECT_NAME}-imu-initializer
+  src/imu_processor/ImuInitializer.cc
+  src/imu_processor/ImuInitializerStatic.cc
+)
+
 add_library(${PROJECT_NAME}-imu-processor
   src/imu_processor/Estimator.cc
-  src/imu_processor/ImuInitializer.cc
   src/imu_processor/MeasurementManager.cc
+)
+add_dependencies(
+  ${PROJECT_NAME}-imu-processor
+  ${PROJECT_NAME}-imu-initializer
 )
 
 # TODO: separate these two libs
@@ -284,6 +292,7 @@ target_link_libraries(${PROJECT_NAME}_mapping_node
 add_executable(${PROJECT_NAME}_estimator_node src/estimator_node.cc)
 add_dependencies(${PROJECT_NAME}_estimator_node
   ${PROJECT_NAME}-imu-processor
+  ${PROJECT_NAME}-imu-initializer
   ${PROJECT_NAME}-factor
   ${PROJECT_NAME}-feature-manager
   ${PROJECT_NAME}-point-processor
@@ -291,6 +300,7 @@ add_dependencies(${PROJECT_NAME}_estimator_node
 )
 target_link_libraries(${PROJECT_NAME}_estimator_node
   ${PROJECT_NAME}-imu-processor
+  ${PROJECT_NAME}-imu-initializer
   ${PROJECT_NAME}-factor
   ${PROJECT_NAME}-feature-manager
   ${PROJECT_NAME}-point-processor
@@ -415,6 +425,7 @@ add_dependencies(${PROJECT_NAME}-test-measurement-manager
 )
 target_link_libraries(${PROJECT_NAME}-test-measurement-manager
   ${PROJECT_NAME}-imu-processor
+  ${PROJECT_NAME}-imu-initializer
   ${PROJECT_NAME}-feature-manager
   ${PROJECT_NAME}-visualizer
   ${imu_processor_EXT_LIBS}
@@ -424,6 +435,7 @@ catkin_add_gtest(${PROJECT_NAME}-test-circular-buffer test/test_imu_processor/te
 add_dependencies(${PROJECT_NAME}-test-circular-buffer ${PROJECT_NAME}-imu-processor)
 target_link_libraries(${PROJECT_NAME}-test-circular-buffer
   ${PROJECT_NAME}-imu-processor
+  ${PROJECT_NAME}-imu-initializer
   ${imu_processor_EXT_LIBS}
 )
 

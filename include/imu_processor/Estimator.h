@@ -103,6 +103,8 @@ struct EstimatorConfig {
   bool enable_deskew = true; ///< if disable, deskew from PointOdometry will be used
   bool cutoff_deskew = false;
   bool keep_features = false;
+  
+  bool static_init = true; // false
 
   IntegrationBaseConfig pim_config;
 };
